@@ -1,0 +1,19 @@
+{
+  "name": "ai-self-improving-tests",
+  "version": "1.0.0",
+  "description": "A test suite that improves itself overnight using AI",
+  "scripts": {
+    "test": "playwright test",
+    "test:json": "playwright test --reporter=json",
+    "improve": "ts-node scripts/analyze-and-improve.ts"
+  },
+  "dependencies": {
+    "openai": "^4.77.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.0",
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.3.0"
+  }
+}

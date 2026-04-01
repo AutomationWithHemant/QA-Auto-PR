@@ -1,0 +1,146 @@
+const OpenAI = require('openai');
+const fs = require('fs');
+const path = require('path');
+
+const client = new OpenAI.default({ apiKey: process.env.OPENAI_API_KEY });
+
+function parseResults(resultsPath) {
+  const analysis = { failedTests: [], slowTests: [] };
+  if (!fs.existsSync(resultsPath)) {
+    console.log('No test results found — AI will suggest improvements from code review');
+    return analysis;
+  }
+  const raw = fs.readFileSync(resultsPath, 'utf-8');
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return analysis;
+
+  const results = JSON.parse(jsonMatch[0]);
+
+  function walkSuites(suites, file) {
+    for (const suite of (suites || [])) {
+      const filePath = suite.file || file;
+      for (const spec of (suite.specs || [])) {
+        for (const test of (spec.tests || [])) {
+          if (test.status !== 'passed' && test.status !== 'expected') {
+            analysis.failedTests.push({
+              title: spec.title,
+              file: filePath,
+              error: (test.errors && test.errors[0] && test.errors[0].message || 'Unknown').slice(0, 300),
+              duration: test.duration,
+            });
+          }
+          if (test.duration > 5000) {
+            analysis.slowTests.push({ title: spec.title, file: filePath, duration: test.duration });
+          }
+        }
+      }
+      if (suite.suites) walkSuites(suite.suites, filePath);
+    }
+  }
+  walkSuites(results.suites || [], '');
+  return analysis;
+}
+
+function readTestFiles() {
+  const testsDir = path.join(process.cwd(), 'tests');
+  return fs.readdirSync(testsDir)
+    .filter(f => f.endsWith('.spec.ts'))
+    .map(f => ({ path: 'tests/' + f, content: fs.readFileSync(path.join(testsDir, f), 'utf-8') }));
+}
+
+function buildPrompt(analysis, testFiles) {
+  const failed = analysis.failedTests.length > 0
+    ? analysis.failedTests.map(t => `- "${t.title}" in ${t.file}\n  Error: ${t.error}`).join('\n')
+    : '- None';
+  const slow = analysis.slowTests.length > 0
+    ? analysis.slowTests.map(t => `- "${t.title}" — ${t.duration}ms`).join('\n')
+    : '- None';
+  const files = testFiles.map(f => `### ${f.path}\n${f.content}`).join('\n\n');
+
+  return `You are a senior QA automation engineer. Analyze these Playwright tests and return improvements.
+
+FAILED TESTS: ${failed}
+SLOW TESTS: ${slow}
+
+TEST FILES:
+${files}
+
+INSTRUCTIONS:
+- Replace waitForTimeout with waitForSelector or waitForLoadState
+- Add test.describe.configure({ retries: 2 }) for flaky tests
+- Fix weak assertions
+- Add beforeEach for test isolation
+- Add 1-2 new tests for gaps marked with "// GAP:"
+
+You MUST respond with a JSON object with exactly these fields:
+{
+  "summary": "string describing improvements",
+  "files": [{"path": "tests/x.spec.ts", "content": "full file content string", "changes": ["change 1"]}],
+  "newFiles": []
+}
+
+The "newFiles" field MUST always be present as an array (use empty array [] if no new files).
+Only include files you actually modified in "files".`;
+}
+
+async function main() {
+  console.log('\n=== AI Test Improvement Pipeline ===\n');
+
+  const analysis = parseResults(path.join(process.cwd(), 'test-results', 'results.json'));
+  console.log(`Failed: ${analysis.failedTests.length}, Slow: ${analysis.slowTests.length}\n`);
+
+  const testFiles = readTestFiles();
+  console.log(`Read ${testFiles.length} test files\n`);
+
+  console.log('Sending to OpenAI...');
+  const response = await client.chat.completions.create({
+    model: 'gpt-4o',
+    max_tokens: 8096,
+    temperature: 0.2,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: 'You are a QA engineer. Always respond with valid JSON containing summary, files, and newFiles fields.' },
+      { role: 'user', content: buildPrompt(analysis, testFiles) }
+    ],
+  });
+
+  const raw = response.choices[0].message.content || '{}';
+  const result = JSON.parse(raw);
+
+  console.log('\nSummary:', result.summary || 'N/A');
+  console.log();
+
+  const files = Array.isArray(result.files) ? result.files : [];
+  const newFiles = Array.isArray(result.newFiles) ? result.newFiles : [];
+  const changed = [];
+
+  for (const f of files) {
+    if (!f.path || !f.content) continue;
+    fs.writeFileSync(path.join(process.cwd(), f.path), f.content, 'utf-8');
+    console.log('  Updated:', f.path);
+    changed.push(f.path);
+  }
+
+  for (const f of newFiles) {
+    if (!f.path || !f.content) continue;
+    fs.mkdirSync(path.dirname(path.join(process.cwd(), f.path)), { recursive: true });
+    fs.writeFileSync(path.join(process.cwd(), f.path), f.content, 'utf-8');
+    console.log('  Created:', f.path);
+    changed.push(f.path);
+  }
+
+  if (changed.length === 0) {
+    console.log('No changes generated.');
+    return;
+  }
+
+  fs.writeFileSync('.improvement-manifest.json', JSON.stringify({ files: changed }, null, 2));
+
+  const prBody = `## AI-Generated Test Improvements\n\n${result.summary || ''}\n\n### Files Changed\n${changed.map(f => '- ' + f).join('\n')}\n\n---\n*Generated by GPT-4o on ${new Date().toISOString().split('T')[0]}*`;
+  fs.mkdirSync('test-results', { recursive: true });
+  fs.writeFileSync('test-results/improvement-summary.md', prBody);
+
+  console.log(`\nDone. ${changed.length} file(s) ready for PR.`);
+}
+
+main().catch(err => { console.error('Error:', err); process.exit(1); });

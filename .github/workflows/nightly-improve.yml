@@ -1,0 +1,43 @@
+name: AI Test Improvement
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 2am UTC every night
+  workflow_dispatch:        # Manual trigger — essential for demos
+
+jobs:
+  improve:
+    name: Run Tests + Analyze & Improve with AI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run tests (failures are data, not blockers)
+        continue-on-error: true
+        run: npx playwright test --reporter=json 2>&1 | tee test-results/results.json
+
+      - name: Analyze results and generate improvements
+        run: node scripts/analyze-and-improve.js
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Create improvement PR
+        run: bash scripts/create-pr.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}

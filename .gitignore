@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+test-results/*.json
+test-results/html/
+test-results/improvement-summary.md
+.improvement-manifest.json
+playwright-report/
