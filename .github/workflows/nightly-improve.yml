@@ -2,7 +2,7 @@ name: AI Test Improvement
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # 2am UTC every night
+    - cron: '2 * * * *'   # 2am UTC every night
   workflow_dispatch:        # Manual trigger — essential for demos
 
 jobs:
